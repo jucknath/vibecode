@@ -2,6 +2,8 @@
 
 vibelock is a minimal X11 screen locker that strives to remove every obvious path for escaping or leaking keystrokes while the session is locked.  It combines classic X11 grabs with low‑level evdev keyboard grabs, gsettings tweaks, and virtual‑terminal switching locks to keep focus on its full‑screen window until the user successfully authenticates with PAM.
 
+> **Warning:** This entire project is vibe coded using OpenAI's Codex tool.
+
 ## Features
 - **X11 + evdev grabs** – locks both the X server input queue and every `/dev/input/event*` keyboard so new devices cannot inject keystrokes.
 - **Password auth via PAM** – uses the `login` service by default so any system account policy applies (2FA, LDAP, etc.).
