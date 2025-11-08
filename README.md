@@ -1,8 +1,12 @@
+vibelock exists to provide a hardened X11 screen locker that aggressively shuts down every obvious bypass vector—media keys, VT or kernel switches, rogue USB keyboards, and other injection paths—so a locked session truly stays locked.  A secondary goal is to keep the footprint minimal, ensuring it runs on any Linux system with X11 regardless of the display manager in use.
+
 # vibelock
 
 vibelock is a minimal X11 screen locker that strives to remove every obvious path for escaping or leaking keystrokes while the session is locked.  It combines classic X11 grabs with low‑level evdev keyboard grabs, gsettings tweaks, and virtual‑terminal switching locks to keep focus on its full‑screen window until the user successfully authenticates with PAM.
 
-> **Warning:** This entire project is vibe coded using OpenAI's Codex tool.
+> **Warning:** This entire project is vibe coded using OpenAI's Codex tool (yes, even this warning was vibe coded).
+> This repository is a PoC for vibe coding, but it has still been reviewed by a second person who is a professional pen tester.
+> **Warning:** For maximum protection (full evdev coverage, VT blocking, and PAM access) run vibelock with root privileges—anything less may leave attack paths open.
 
 ## Features
 - **X11 + evdev grabs** – locks both the X server input queue and every `/dev/input/event*` keyboard so new devices cannot inject keystrokes.
