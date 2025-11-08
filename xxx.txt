@@ -1,0 +1,2 @@
+sudo VIBELOCK_EVDEV_GRAB=1 ./vibelock
+g++ -O2 -std=c++17 vibelock.cpp -o vibelock -lX11 -lXi -lpam -pthread
