@@ -124,7 +124,7 @@ public:
     }
 
 private:
-    bool isKeyboard(int fd) {
+    bool isInputDevice(int fd) {
         std::array<unsigned long, kEvBitArraySize> evBits{};
         if (ioctl(fd, EVIOCGBIT(0, sizeof(evBits)), evBits.data()) < 0) {
             return false;
@@ -148,10 +148,24 @@ private:
         };
 
         // Accept both regular keyboards and media/consumer keyboards so they cannot bypass the grab.
-        return hasAnyKey({KEY_A, KEY_Q, KEY_Z, KEY_1, KEY_ENTER, KEY_SPACE, KEY_LEFTCTRL}) ||
-               hasAnyKey({KEY_PLAYPAUSE, KEY_STOPCD, KEY_NEXTSONG, KEY_PREVIOUSSONG, KEY_MUTE,
-                          KEY_VOLUMEUP, KEY_VOLUMEDOWN, KEY_HOMEPAGE, KEY_REFRESH, KEY_SEARCH}) ||
-               hasAnyKey({KEY_POWER, KEY_POWER2, KEY_SLEEP, KEY_SUSPEND, KEY_WAKEUP});
+        const bool keyboardKeys =
+            hasAnyKey({KEY_A, KEY_Q, KEY_Z, KEY_1, KEY_ENTER, KEY_SPACE, KEY_LEFTCTRL});
+        const bool mediaKeys = hasAnyKey({KEY_PLAYPAUSE, KEY_STOPCD, KEY_NEXTSONG, KEY_PREVIOUSSONG, KEY_MUTE,
+                                          KEY_VOLUMEUP, KEY_VOLUMEDOWN, KEY_HOMEPAGE, KEY_REFRESH, KEY_SEARCH});
+        const bool powerKeys = hasAnyKey({KEY_POWER, KEY_POWER2, KEY_SLEEP, KEY_SUSPEND, KEY_WAKEUP});
+        const bool pointerButtons =
+            hasAnyKey({BTN_LEFT, BTN_RIGHT, BTN_MIDDLE, BTN_SIDE, BTN_EXTRA, BTN_FORWARD, BTN_BACK, BTN_TASK});
+        const bool touchButtons =
+            hasAnyKey({BTN_TOUCH, BTN_TOOL_FINGER, BTN_TOOL_DOUBLETAP, BTN_TOOL_TRIPLETAP, BTN_TOOL_QUADTAP});
+        const bool stylusButtons =
+            hasAnyKey({BTN_TOOL_PEN, BTN_TOOL_RUBBER, BTN_STYLUS, BTN_STYLUS2, BTN_STYLUS3});
+        const bool hasAbs = testBit(evBits.data(), evBits.size(), EV_ABS);
+        const bool hasRel = testBit(evBits.data(), evBits.size(), EV_REL);
+        const bool pointerLike = (pointerButtons && (hasAbs || hasRel)) ||
+                                 (touchButtons && hasAbs) ||
+                                 (stylusButtons && hasAbs);
+
+        return keyboardKeys || mediaKeys || powerKeys || pointerLike;
     }
 
     bool addDevice(const std::string &path) {
@@ -243,7 +257,7 @@ private:
         if (fd < 0) {
             return false;
         }
-        if (!isKeyboard(fd)) {
+        if (!isInputDevice(fd)) {
             close(fd);
             return false;
         }
@@ -536,6 +550,45 @@ struct AltTabGuard {
     }
 };
 
+struct OverviewGuard {
+    struct Entry {
+        std::string schema;
+        std::string key;
+        std::string originalValue;
+        bool changed{false};
+    };
+
+    std::vector<Entry> entries{
+        {"org.gnome.shell.keybindings", "toggle-overview", "", false},
+        {"org.gnome.shell.keybindings", "shift-overview-up", "", false},
+        {"org.gnome.shell.keybindings", "shift-overview-down", "", false}
+    };
+
+    void disable() {
+        for (auto &entry : entries) {
+            entry.originalValue = getSettingValue(entry.schema, entry.key);
+            if (setSettingValue(entry.schema, entry.key, "[]")) {
+                entry.changed = true;
+            }
+        }
+    }
+
+    void restore() {
+        for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+            if (it->changed) {
+                std::string value = it->originalValue.empty() ? "[]" : it->originalValue;
+                setSettingValue(it->schema, it->key, value);
+                it->changed = false;
+            }
+            it->originalValue.clear();
+        }
+    }
+
+    ~OverviewGuard() {
+        restore();
+    }
+};
+
 class VTSwitchGuard {
 public:
     bool lock() {
@@ -748,6 +801,9 @@ int main(int argc, char **argv) {
     AltTabGuard altTabGuard;
     altTabGuard.disable();
 
+    OverviewGuard overviewGuard;
+    overviewGuard.disable();
+
     VTSwitchGuard vtGuard;
     if (vtGuard.lock()) {
         std::cerr << "vibelock: VT switching locked" << std::endl;
@@ -760,9 +816,21 @@ int main(int argc, char **argv) {
     const unsigned int width = static_cast<unsigned int>(std::max(0, DisplayWidth(dpy, screen)));
     const unsigned int height = static_cast<unsigned int>(std::max(0, DisplayHeight(dpy, screen)));
 
+    Colormap colormap = DefaultColormap(dpy, screen);
+    const unsigned long backgroundPixel = BlackPixel(dpy, screen);
+    unsigned long textPixel = WhitePixel(dpy, screen);
+    XColor greenText{};
+    greenText.red = 0;
+    greenText.green = 65535;
+    greenText.blue = 0;
+    greenText.flags = DoRed | DoGreen | DoBlue;
+    if (XAllocColor(dpy, colormap, &greenText)) {
+        textPixel = greenText.pixel;
+    }
+
     XSetWindowAttributes attrs{};
     attrs.override_redirect = True;
-    attrs.background_pixel = BlackPixel(dpy, screen);
+    attrs.background_pixel = backgroundPixel;
     attrs.event_mask = KeyPressMask | KeyReleaseMask | ExposureMask;
 
     Window win = XCreateWindow(
@@ -807,8 +875,8 @@ int main(int argc, char **argv) {
     XSetWindowAttributes focusAttrs{};
     focusAttrs.override_redirect = False;
     focusAttrs.event_mask = KeyPressMask | KeyReleaseMask | FocusChangeMask | StructureNotifyMask;
-    focusAttrs.background_pixel = BlackPixel(dpy, screen);
-    focusAttrs.border_pixel = BlackPixel(dpy, screen);
+    focusAttrs.background_pixel = backgroundPixel;
+    focusAttrs.border_pixel = backgroundPixel;
     Window focusWin = XCreateWindow(
         dpy,
         root,
@@ -830,7 +898,7 @@ int main(int argc, char **argv) {
     }
 
     GC gc = XCreateGC(dpy, win, 0, nullptr);
-    XSetForeground(dpy, gc, WhitePixel(dpy, screen));
+    XSetForeground(dpy, gc, textPixel);
 
     constexpr int kScaleFactor = 10;
     const std::string defaultMessage = "Screen locked";
@@ -1215,8 +1283,84 @@ int main(int argc, char **argv) {
         }
     };
 
+    constexpr size_t kXiPointerMaskLength = XIMaskLen(XI_GestureSwipeEnd);
+    auto fillPointerMask = [&](std::array<unsigned char, kXiPointerMaskLength> &maskData) {
+        maskData.fill(0);
+        XISetMask(maskData.data(), XI_ButtonPress);
+        XISetMask(maskData.data(), XI_ButtonRelease);
+        XISetMask(maskData.data(), XI_Motion);
+        XISetMask(maskData.data(), XI_TouchBegin);
+        XISetMask(maskData.data(), XI_TouchUpdate);
+        XISetMask(maskData.data(), XI_TouchEnd);
+        XISetMask(maskData.data(), XI_TouchOwnership);
+        XISetMask(maskData.data(), XI_RawButtonPress);
+        XISetMask(maskData.data(), XI_RawButtonRelease);
+        XISetMask(maskData.data(), XI_RawMotion);
+        XISetMask(maskData.data(), XI_RawTouchBegin);
+        XISetMask(maskData.data(), XI_RawTouchUpdate);
+        XISetMask(maskData.data(), XI_RawTouchEnd);
+        XISetMask(maskData.data(), XI_GesturePinchBegin);
+        XISetMask(maskData.data(), XI_GesturePinchUpdate);
+        XISetMask(maskData.data(), XI_GesturePinchEnd);
+        XISetMask(maskData.data(), XI_GestureSwipeBegin);
+        XISetMask(maskData.data(), XI_GestureSwipeUpdate);
+        XISetMask(maskData.data(), XI_GestureSwipeEnd);
+    };
+
+    auto grabXiPointerDevice = [&](int deviceId) -> bool {
+        if (deviceId < 0) {
+            return false;
+        }
+        XIEventMask mask;
+        std::array<unsigned char, kXiPointerMaskLength> maskData{};
+        fillPointerMask(maskData);
+        mask.deviceid = deviceId;
+        mask.mask_len = static_cast<int>(maskData.size());
+        mask.mask = maskData.data();
+
+        int status = XIGrabDevice(dpy,
+                                  deviceId,
+                                  win,
+                                  CurrentTime,
+                                  invisible,
+                                  XIGrabModeAsync,
+                                  XIGrabModeAsync,
+                                  False,
+                                  &mask);
+        return status == Success;
+    };
+
+    auto grabAllXiPointers = [&]() -> std::vector<int> {
+        std::vector<int> grabbed;
+        int nDevices = 0;
+        XIDeviceInfo *info = XIQueryDevice(dpy, XIAllDevices, &nDevices);
+        if (!info) {
+            return grabbed;
+        }
+        for (int i = 0; i < nDevices; ++i) {
+            if (info[i].use != XIMasterPointer && info[i].use != XISlavePointer) {
+                continue;
+            }
+            if (grabXiPointerDevice(info[i].deviceid)) {
+                grabbed.push_back(info[i].deviceid);
+            }
+        }
+        XIFreeDeviceInfo(info);
+        return grabbed;
+    };
+
+    auto ungrabXiPointerDevices = [&](const std::vector<int> &devices) {
+        for (int deviceId : devices) {
+            if (deviceId >= 0) {
+                XIUngrabDevice(dpy, deviceId, CurrentTime);
+            }
+        }
+    };
+
     int masterKeyboardId = queryMasterKeyboard();
     bool xiKeyboardGrabbed = grabXiKeyboard(masterKeyboardId);
+    std::vector<int> xiPointerDevices = grabAllXiPointers();
+    bool xiPointerGrabbed = !xiPointerDevices.empty();
 
     bool running = true;
     auto handleSubmitResult = [&](SubmitResult result) {
@@ -1494,6 +1638,9 @@ int main(int argc, char **argv) {
     }
     if (xiKeyboardGrabbed) {
         ungrabXiKeyboard(masterKeyboardId);
+    }
+    if (xiPointerGrabbed) {
+        ungrabXiPointerDevices(xiPointerDevices);
     }
     XSetErrorHandler(previousErrorHandler);
     XFreeGC(dpy, gc);
