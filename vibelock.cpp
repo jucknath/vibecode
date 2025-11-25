@@ -7,6 +7,7 @@
 #include <pwd.h>
 
 #include <X11/extensions/XInput2.h>
+#include <X11/extensions/Xinerama.h>
 
 #include <algorithm>
 #include <array>
@@ -815,6 +816,7 @@ int main(int argc, char **argv) {
     Window root = RootWindow(dpy, screen);
     const unsigned int width = static_cast<unsigned int>(std::max(0, DisplayWidth(dpy, screen)));
     const unsigned int height = static_cast<unsigned int>(std::max(0, DisplayHeight(dpy, screen)));
+    const unsigned int depth = static_cast<unsigned int>(std::max(0, DefaultDepth(dpy, screen)));
 
     Colormap colormap = DefaultColormap(dpy, screen);
     const unsigned long backgroundPixel = BlackPixel(dpy, screen);
@@ -826,7 +828,37 @@ int main(int argc, char **argv) {
     greenText.flags = DoRed | DoGreen | DoBlue;
     if (XAllocColor(dpy, colormap, &greenText)) {
         textPixel = greenText.pixel;
+    } else {
+        std::cerr << "vibelock: warning: unable to allocate green text color, using default" << std::endl;
     }
+
+    struct MonitorRect {
+        int x{0};
+        int y{0};
+        int width{0};
+        int height{0};
+    };
+
+    auto queryMonitors = [&]() -> std::vector<MonitorRect> {
+        std::vector<MonitorRect> monitors;
+        int count = 0;
+        if (XineramaIsActive(dpy)) {
+            XineramaScreenInfo *screens = XineramaQueryScreens(dpy, &count);
+            if (screens) {
+                for (int i = 0; i < count; ++i) {
+                    monitors.push_back(
+                        {screens[i].x_org, screens[i].y_org, screens[i].width, screens[i].height});
+                }
+                XFree(screens);
+            }
+        }
+        if (monitors.empty()) {
+            monitors.push_back({0, 0, static_cast<int>(width), static_cast<int>(height)});
+        }
+        return monitors;
+    };
+
+    const std::vector<MonitorRect> monitors = queryMonitors();
 
     XSetWindowAttributes attrs{};
     attrs.override_redirect = True;
@@ -897,7 +929,9 @@ int main(int argc, char **argv) {
         XSelectInput(dpy, focusWin, KeyPressMask | KeyReleaseMask | FocusChangeMask);
     }
 
-    GC gc = XCreateGC(dpy, win, 0, nullptr);
+    Pixmap backBuffer = XCreatePixmap(dpy, win, width, height, depth);
+    Drawable gcDrawable = backBuffer ? static_cast<Drawable>(backBuffer) : static_cast<Drawable>(win);
+    GC gc = XCreateGC(dpy, gcDrawable, 0, nullptr);
     XSetForeground(dpy, gc, textPixel);
 
     constexpr int kScaleFactor = 10;
@@ -983,7 +1017,6 @@ int main(int argc, char **argv) {
 
         const unsigned int pixWidth = clampUnsigned(textWidth);
         const unsigned int pixHeight = clampUnsigned(textHeightVal);
-        const unsigned int depth = static_cast<unsigned int>(std::max(0, DefaultDepth(dpy, screen)));
         Pixmap textPixmap = XCreatePixmap(dpy, win, pixWidth, pixHeight, depth);
         if (!textPixmap) {
             return result;
@@ -995,9 +1028,9 @@ int main(int argc, char **argv) {
             return result;
         }
 
-        XSetForeground(dpy, textGC, BlackPixel(dpy, screen));
+        XSetForeground(dpy, textGC, backgroundPixel);
         XFillRectangle(dpy, textPixmap, textGC, 0, 0, pixWidth, pixHeight);
-        XSetForeground(dpy, textGC, WhitePixel(dpy, screen));
+        XSetForeground(dpy, textGC, textPixel);
         int baseline = fontInfo ? fontInfo->ascent : textHeightVal - baseSpacing;
         if (baseline < 0) {
             baseline = textHeightVal;
@@ -1042,7 +1075,18 @@ int main(int argc, char **argv) {
         return result;
     };
 
-    auto drawFallback = [&](const char *text, int y, int &heightOut) {
+    auto targetDrawable = [&]() -> Drawable {
+        return backBuffer ? static_cast<Drawable>(backBuffer) : static_cast<Drawable>(win);
+    };
+
+    auto clearTarget = [&]() {
+        Drawable target = targetDrawable();
+        XSetForeground(dpy, gc, backgroundPixel);
+        XFillRectangle(dpy, target, gc, 0, 0, width, height);
+        XSetForeground(dpy, gc, textPixel);
+    };
+
+    auto drawFallback = [&](const MonitorRect &mon, const char *text, int y, int &heightOut) {
         heightOut = 0;
         if (!text) {
             return;
@@ -1054,9 +1098,9 @@ int main(int argc, char **argv) {
         int textWidth = 0;
         int textHeightVal = 0;
         measureText(text, len, textWidth, textHeightVal);
-        int x = std::max(0, (static_cast<int>(width) - textWidth) / 2);
-        int baseline = y + (fontInfo ? fontInfo->ascent : textHeightVal);
-        XDrawString(dpy, win, gc, x, baseline, text, len);
+        int x = mon.x + std::max(0, (mon.width - textWidth) / 2);
+        int baseline = mon.y + y + (fontInfo ? fontInfo->ascent : textHeightVal);
+        XDrawString(dpy, targetDrawable(), gc, x, baseline, text, len);
         heightOut = textHeightVal;
     };
 
@@ -1077,48 +1121,63 @@ int main(int argc, char **argv) {
     };
 
     auto drawContent = [&]() {
-        auto drawImage = [&](const ScaledText &img, int y) {
+        Drawable target = targetDrawable();
+        auto drawImage = [&](const MonitorRect &mon, const ScaledText &img, int y) {
             if (!img.image) {
                 return;
             }
-            int x = std::max(0, (static_cast<int>(width) - img.width) / 2);
-            XPutImage(dpy, win, gc, img.image, 0, 0, x, y, clampUnsigned(img.width), clampUnsigned(img.height));
+            int x = mon.x + std::max(0, (mon.width - img.width) / 2);
+            XPutImage(dpy,
+                      target,
+                      gc,
+                      img.image,
+                      0,
+                      0,
+                      x,
+                      mon.y + y,
+                      clampUnsigned(img.width),
+                      clampUnsigned(img.height));
         };
 
         bool hasPassword = passwordImage.image || !passwordFallbackText.empty();
         int spacing = hasPassword ? baseSpacing * kScaleFactor : 0;
 
-        int totalHeight = messageImage.image ? messageImage.height : textHeight(messageText.c_str());
-        if (hasPassword) {
-            int pwdHeight = passwordImage.image ? passwordImage.height : textHeight(passwordFallbackText.c_str());
-            totalHeight += spacing + pwdHeight;
-        }
+        for (const auto &mon : monitors) {
+            int totalHeight = messageImage.image ? messageImage.height : textHeight(messageText.c_str());
+            if (hasPassword) {
+                int pwdHeight = passwordImage.image ? passwordImage.height : textHeight(passwordFallbackText.c_str());
+                totalHeight += spacing + pwdHeight;
+            }
 
-        int currentY = std::max(0, (static_cast<int>(height) - totalHeight) / 2);
-        if (messageImage.image) {
-            drawImage(messageImage, currentY);
-            currentY += messageImage.height;
-        } else {
-            int drawn = 0;
-            drawFallback(messageText.c_str(), currentY, drawn);
-            currentY += drawn;
-        }
-
-        if (hasPassword) {
-            currentY += spacing;
-            if (passwordImage.image) {
-                drawImage(passwordImage, currentY);
+            int currentY = std::max(0, (mon.height - totalHeight) / 2);
+            if (messageImage.image) {
+                drawImage(mon, messageImage, currentY);
+                currentY += messageImage.height;
             } else {
                 int drawn = 0;
-                drawFallback(passwordFallbackText.c_str(), currentY, drawn);
+                drawFallback(mon, messageText.c_str(), currentY, drawn);
                 currentY += drawn;
+            }
+
+            if (hasPassword) {
+                currentY += spacing;
+                if (passwordImage.image) {
+                    drawImage(mon, passwordImage, currentY);
+                } else {
+                    int drawn = 0;
+                    drawFallback(mon, passwordFallbackText.c_str(), currentY, drawn);
+                    currentY += drawn;
+                }
             }
         }
     };
 
     auto redraw = [&]() {
-        XClearWindow(dpy, win);
+        clearTarget();
         drawContent();
+        if (backBuffer) {
+            XCopyArea(dpy, backBuffer, win, gc, 0, 0, width, height, 0, 0);
+        }
         XFlush(dpy);
     };
 
@@ -1643,6 +1702,9 @@ int main(int argc, char **argv) {
         ungrabXiPointerDevices(xiPointerDevices);
     }
     XSetErrorHandler(previousErrorHandler);
+    if (backBuffer) {
+        XFreePixmap(dpy, backBuffer);
+    }
     XFreeGC(dpy, gc);
     XDestroyWindow(dpy, win);
     XFreeCursor(dpy, invisible);
