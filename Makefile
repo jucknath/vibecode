@@ -4,6 +4,7 @@ CXXFLAGS := -std=c++17 -Werror -fstack-protector-strong -fcf-protection=full -fs
             -Werror=float-equal -Wshadow -Wcast-align -Wunused -Wnull-dereference -Wdouble-promotion \
             -Wimplicit-fallthrough -Wextra-semi -Woverloaded-virtual -Wnon-virtual-dtor -Wold-style-cast
 LDLIBS := -lX11 -lXi -lXext -lXinerama -lpam -pthread
+LDLIBS += -lXtst
 
 TARGET := vibelock
 SRC := vibelock.cpp

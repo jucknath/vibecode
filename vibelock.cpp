@@ -8,6 +8,7 @@
 
 #include <X11/extensions/XInput2.h>
 #include <X11/extensions/Xinerama.h>
+#include <X11/extensions/XTest.h>
 
 #include <algorithm>
 #include <array>
@@ -1523,6 +1524,56 @@ int main(int argc, char **argv) {
         }
     };
 
+    auto releaseStuckModifiers = [&]() {
+        int eventBase = 0;
+        int errorBase = 0;
+        int major = 0;
+        int minor = 0;
+        if (!XTestQueryExtension(dpy, &eventBase, &errorBase, &major, &minor)) {
+            std::cerr << "vibelock: warning: XTest unavailable; cannot synthesize modifier releases" << std::endl;
+            return;
+        }
+
+        char keymap[32]{};
+        XQueryKeymap(dpy, keymap);
+
+        auto isPressed = [&](KeyCode code) -> bool {
+            int idx = static_cast<int>(code);
+            if (idx < 0 || idx >= 256) {
+                return false;
+            }
+            return (keymap[idx / 8] & (1 << (idx % 8))) != 0;
+        };
+
+        const std::vector<KeySym> modifierSyms{
+            XK_Super_L, XK_Super_R, XK_Meta_L, XK_Meta_R,
+            XK_Alt_L,   XK_Alt_R,   XK_Control_L, XK_Control_R,
+            XK_Hyper_L, XK_Hyper_R};
+
+        std::vector<KeyCode> keycodes;
+        for (KeySym sym : modifierSyms) {
+            KeyCode code = XKeysymToKeycode(dpy, sym);
+            if (code == 0) {
+                continue;
+            }
+            if (std::find(keycodes.begin(), keycodes.end(), code) == keycodes.end()) {
+                keycodes.push_back(code);
+            }
+        }
+
+        bool sent = false;
+        for (KeyCode code : keycodes) {
+            if (isPressed(code)) {
+                XTestFakeKeyEvent(dpy, code, False, CurrentTime);
+                sent = true;
+            }
+        }
+        if (sent) {
+            XFlush(dpy);
+            std::cerr << "vibelock: synthesized modifier key releases" << std::endl;
+        }
+    };
+
     const bool useEvdevInput = evdevActive;
     unsigned int evdevState = 0;
     bool evdevCapsLock = false;
@@ -1686,6 +1737,7 @@ int main(int argc, char **argv) {
 
     XUngrabKeyboard(dpy, CurrentTime);
     XUngrabPointer(dpy, CurrentTime);
+    releaseStuckModifiers();
 
     destroyScaledText(messageImage);
     destroyScaledText(passwordImage);
